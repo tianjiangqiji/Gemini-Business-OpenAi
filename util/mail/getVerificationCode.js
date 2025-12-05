@@ -1,6 +1,8 @@
 const { selectAccount, prompt } = require("../selectAccount");
+const { getCredentials } = require("../config");
 
 const EMAIL_LIST_URL = "https://mail.sohua.cc/api/email/list";
+const { timezone = "UTC" } = getCredentials();
 
 /**
  * 确保 fetch API 可用
@@ -9,6 +11,48 @@ function ensureFetchAvailable() {
     if (typeof globalThis.fetch !== "function") {
         throw new Error("当前 Node 版本不支持全局 fetch，请使用 Node 18+ 或自行 polyfill fetch");
     }
+}
+
+/**
+ * 判断时间是否在指定分钟内
+ * @param {string|number|Date} time
+ * @param {number} minutes
+ * @returns {boolean}
+ */
+function normalizeTimestamp(time, tz = "UTC") {
+    const raw = Number(time);
+    if (!Number.isNaN(raw)) {
+        // 如果是秒级时间戳，转换为毫秒
+        if (raw < 1e12) return raw * 1000;
+        return raw;
+    }
+
+    const str = String(time || "").trim();
+
+    // 已包含时区信息，直接解析
+    if (/(\+|-)\d{2}:?\d{2}|Z$/i.test(str)) {
+        return new Date(str).getTime();
+    }
+
+    // 解析配置的时区，例如 UTC、UTC+08:00、UTC-05:30
+    const match = /^UTC(?:(\+|-)(\d{2})(?::?(\d{2}))?)?$/.exec(tz);
+    if (!match) return new Date(str).getTime(); // 无法识别时区则按环境解析
+
+    const sign = match[1] === "-" ? -1 : 1;
+    const hours = Number(match[2] || 0);
+    const minutes = Number(match[3] || 0);
+    const offsetMinutes = sign * (hours * 60 + minutes);
+
+    // 将本地时间字符串附加时区偏移
+    const isoLike = str.replace(" ", "T");
+    const offsetStr = `${sign === 1 ? "+" : "-"}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    return new Date(`${isoLike}${offsetStr}`).getTime();
+}
+
+function isWithinMinutes(time, minutes = 3) {
+    const ts = normalizeTimestamp(time, timezone);
+    if (Number.isNaN(ts)) return false;
+    return Date.now() - ts <= minutes * 60 * 1000;
 }
 
 /**
@@ -112,36 +156,58 @@ async function getVerificationCode(token, rl = null) {
 
     console.log(`\n正在获取 ${selectedAccount.email} 的最新邮件...`);
 
-    // 获取邮件列表
-    const emailData = await fetchEmailList(token, selectedAccount.accountId, 10);
+    const maxRetries = 5;
+    const retryDelay = 10000; // 10 秒
 
-    if (!emailData.list || emailData.list.length === 0) {
-        console.log("\n❌ 该账号暂无邮件。");
-        await prompt("\n按回车键返回主菜单...", rl);
-        return;
+    for (let i = 0; i < maxRetries; i++) {
+        console.log(`\n⏳ 正在获取验证码... (尝试 ${i + 1}/${maxRetries})`);
+
+        // 获取邮件列表
+        const emailData = await fetchEmailList(token, selectedAccount.accountId, 10);
+
+        if (!emailData.list || emailData.list.length === 0) {
+            console.log("❌ 该账号暂无邮件。");
+        } else {
+            const sortedList = [...emailData.list].sort((a, b) => normalizeTimestamp(b.createTime) - normalizeTimestamp(a.createTime));
+            const latestMail = sortedList[0];
+            const latestMailTime = latestMail?.createTime;
+            const latestTs = normalizeTimestamp(latestMailTime);
+            console.log(`ℹ️  最新邮件时间: ${latestMailTime} (ts=${latestTs})，距离现在 ${(Date.now() - latestTs) / 1000}s`);
+
+            if (Number.isNaN(latestTs)) {
+                console.log("⚠️  最新邮件时间无法解析，10秒后重试...");
+            } else if (!isWithinMinutes(latestMailTime, 3)) {
+                console.log("⚠️  最新邮件不在3分钟内，可能验证码尚未送达，10秒后重试...");
+            } else {
+                // 查找验证码
+                const verificationInfo = findLatestVerificationCode(sortedList);
+
+                if (!verificationInfo) {
+                    console.log("❌ 未找到 ChatGPT 验证码邮件，10秒后重试...");
+                } else if (!isWithinMinutes(verificationInfo.time, 3)) {                    
+                    console.log(`⚠️  找到的验证码邮件时间: ${verificationInfo.time} (ts=${normalizeTimestamp(verificationInfo.time)}) 不是3分钟内的，10秒后重试...`);
+                } else {
+                    // 显示验证码信息
+                    console.log("\n✓ 找到验证码！");
+                    console.log("=".repeat(50));
+                    console.log(`📧 验证码: ${verificationInfo.code}`);
+                    console.log(`⏰ 接收时间: ${verificationInfo.time}`);
+                    console.log(`📨 发件人: ${verificationInfo.from}`);
+                    console.log(`📝 主题: ${verificationInfo.subject}`);
+                    console.log("=".repeat(50));
+
+                    await prompt("\n按回车键返回主菜单...", rl);
+                    return;
+                }
+            }
+        }
+
+        if (i < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
     }
 
-    // 查找验证码
-    const verificationInfo = findLatestVerificationCode(emailData.list);
-
-    if (!verificationInfo) {
-        console.log("\n❌ 未找到 ChatGPT 验证码邮件。");
-        console.log(`最新邮件主题: ${emailData.list[0].subject}`);
-        console.log(`发件人: ${emailData.list[0].name || emailData.list[0].sendEmail}`);
-        console.log(`时间: ${emailData.list[0].createTime}`);
-        await prompt("\n按回车键返回主菜单...", rl);
-        return;
-    }
-
-    // 显示验证码信息
-    console.log("\n✓ 找到验证码！");
-    console.log("=".repeat(50));
-    console.log(`📧 验证码: ${verificationInfo.code}`);
-    console.log(`⏰ 接收时间: ${verificationInfo.time}`);
-    console.log(`📨 发件人: ${verificationInfo.from}`);
-    console.log(`📝 主题: ${verificationInfo.subject}`);
-    console.log("=".repeat(50));
-
+    console.log("\n❌ 未能在5次重试内获取到3分钟内的验证码邮件。");
     await prompt("\n按回车键返回主菜单...", rl);
 }
 

@@ -3,3 +3,4 @@ credentials:
   password: 
 defaultDomain: '@example.com'
 emailApiUrl: 'https://mail.example.com'
+timezone: 'UTC+08:00' # 邮件服务器所在时区，例如 UTC、UTC+08:00；（大陆为UTC+08:00）

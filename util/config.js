@@ -64,6 +64,7 @@ function getCredentials() {
   const { account, password } = config.credentials;
   const defaultDomain = config.defaultDomain || "@sohua.cc";
   const emailApiUrl = config.emailApiUrl || "https://mail.sohua.cc";
+  const timezone = config.timezone || "UTC";
 
   if (!account || !password) {
     throw new Error("请在 temp-mail.yaml 中填写 account 与 password 字段后再运行");
@@ -74,6 +75,7 @@ function getCredentials() {
     password,
     defaultDomain,
     emailApiUrl,
+    timezone,
     loginEmail: resolveLoginEmail(account, defaultDomain),
   };
 }

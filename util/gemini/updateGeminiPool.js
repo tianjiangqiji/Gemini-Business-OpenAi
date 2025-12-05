@@ -116,8 +116,8 @@ async function deleteAccount(accountId, adminToken) {
  */
 async function deleteAllAccounts(adminToken) {
     try {
-        // 获取所有账户
-        const accounts = await getPoolAccounts(adminToken);
+        // 获取所有账户（按 id 降序删除，避免删除低 id 后高 id 重排导致 404）
+        const accounts = (await getPoolAccounts(adminToken)).sort((a, b) => b.id - a.id);
         
         if (accounts.length === 0) {
             console.log('平台上没有账户需要删除');

@@ -6,7 +6,7 @@ const {
 const { getCredentials } = require("../config");
 
 // 从配置文件获取邮箱 API URL
-const { emailApiUrl } = getCredentials();
+const { emailApiUrl, timezone = "UTC" } = getCredentials();
 const EMAIL_LIST_URL = `${emailApiUrl}/api/email/list`;
 
 /**
@@ -16,6 +16,54 @@ function ensureFetchAvailable() {
     if (typeof globalThis.fetch !== "function") {
         throw new Error("当前 Node 版本不支持全局 fetch，请使用 Node 18+ 或自行 polyfill fetch");
     }
+}
+
+function promptInput(question, rl) {
+    return new Promise((resolve) => {
+        rl.question(question, (answer) => resolve(answer.trim()));
+    });
+}
+
+/**
+ * 判断时间是否在指定分钟内
+ * @param {string|number|Date} time
+ * @param {number} minutes
+ * @returns {boolean}
+ */
+function normalizeTimestamp(time, tz = "UTC") {
+    const raw = Number(time);
+    if (!Number.isNaN(raw)) {
+        // 如果是秒级时间戳，转换为毫秒
+        if (raw < 1e12) return raw * 1000;
+        return raw;
+    }
+
+    const str = String(time || "").trim();
+
+    // 已包含时区信息，直接解析
+    if (/(\+|-)\d{2}:?\d{2}|Z$/i.test(str)) {
+        return new Date(str).getTime();
+    }
+
+    // 解析配置的时区，例如 UTC、UTC+08:00、UTC-05:30
+    const match = /^UTC(?:(\+|-)(\d{2})(?::?(\d{2}))?)?$/.exec(tz);
+    if (!match) return new Date(str).getTime(); // 无法识别时区则按环境解析
+
+    const sign = match[1] === "-" ? -1 : 1;
+    const hours = Number(match[2] || 0);
+    const minutes = Number(match[3] || 0);
+    const offsetMinutes = sign * (hours * 60 + minutes);
+
+    // 将本地时间字符串附加时区偏移
+    const isoLike = str.replace(" ", "T");
+    const offsetStr = `${sign === 1 ? "+" : "-"}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    return new Date(`${isoLike}${offsetStr}`).getTime();
+}
+
+function isWithinMinutes(time, minutes = 3) {
+    const ts = normalizeTimestamp(time, timezone);
+    if (Number.isNaN(ts)) return false;
+    return Date.now() - ts <= minutes * 60 * 1000;
 }
 
 /**
@@ -98,7 +146,7 @@ function findGeminiVerificationCode(emailList) {
  */
 async function waitForGeminiVerificationCode(token, accountId) {
     const maxRetries = 5;
-    const retryDelay = 5000; // 5秒
+    const retryDelay = 10000; // 10秒
 
     for (let i = 0; i < maxRetries; i++) {
         console.log(`   ⏳ 正在获取验证码... (尝试 ${i + 1}/${maxRetries})`);
@@ -107,18 +155,40 @@ async function waitForGeminiVerificationCode(token, accountId) {
             const emailData = await fetchEmailList(token, accountId, 5);
             
             if (emailData.list && emailData.list.length > 0) {
-                const code = findGeminiVerificationCode(emailData.list);
-                if (code) {
-                    console.log(`   ✓ 成功获取验证码: ${code}`);
-                    return code;
+                const sortedList = [...emailData.list].sort((a, b) => normalizeTimestamp(b.createTime) - normalizeTimestamp(a.createTime));
+                const latestMail = sortedList[0];
+                const latestMailTime = latestMail?.createTime;
+                const latestTs = normalizeTimestamp(latestMailTime);
+                console.log(`   ℹ️  最新邮件时间: ${latestMailTime} (ts=${latestTs})，距离现在 ${(Date.now() - latestTs) / 1000}s，主题: ${latestMail?.subject}`);
+
+                if (Number.isNaN(latestTs)) {
+                    console.log("   ⚠️  最新邮件时间无法解析，10秒后重试...");
+                } else if (!isWithinMinutes(latestMailTime, 3)) {
+                    console.log("   ⚠️  最新邮件不在3分钟内，可能验证码尚未送达，10秒后重试...");
+                } else {
+                    const code = findGeminiVerificationCode(sortedList);
+                    if (code) {
+                        // 找到验证码后再确认其时间仍在3分钟内
+                        const matchedMail = sortedList.find(mail => mail.subject === "Gemini Business 验证码" && extractGeminiVerificationCode(mail.text));
+                        if (matchedMail && isWithinMinutes(matchedMail.createTime, 3)) {
+                            console.log(`   ✓ 成功获取验证码: ${code}`);
+                            return code;
+                        } else {
+                            console.log(`   ⚠️  找到的验证码邮件时间: ${matchedMail?.createTime} (ts=${normalizeTimestamp(matchedMail?.createTime)}) 不是3分钟内的，10秒后重试...`);
+                        }
+                    } else {
+                        console.log("   ❌ 未在3分钟内的邮件中找到 Gemini 验证码，10秒后重试...");
+                    }
                 }
+            } else {
+                console.log("   ❌ 邮件列表为空，10秒后重试...");
             }
         } catch (error) {
             console.log(`   ⚠️  获取邮件失败: ${error.message}`);
         }
 
         if (i < maxRetries - 1) {
-            console.log(`   ⏳ 未找到验证码，等待 5 秒后重试...`);
+            console.log(`   ⏳ 未找到符合条件的验证码，等待 10 秒后重试...`);
             await new Promise(resolve => setTimeout(resolve, retryDelay));
         }
     }
@@ -300,6 +370,108 @@ async function loginGeminiChild(childAccount, token) {
 }
 
 /**
+ * 仅登录单个 Gemini 子号用于临时在线使用（不获取 token，不自动关闭浏览器）
+ * @param {Object} childAccount - 子号信息
+ * @param {string} token - 已登录的会话令牌（用于获取邮件）
+ * @param {Object} rl - readline 接口
+ */
+async function openGeminiChildInteractive(token, childAccount, rl) {
+    if (!rl) {
+        throw new Error("缺少 readline 接口");
+    }
+
+    console.log(`\n🔄 正在登录子号(临时在线): ${childAccount.email}`);
+    const puppeteer = require("puppeteer");
+    let browser;
+    let success = false;
+
+    try {
+        console.log(`   ⏳ 启动浏览器...`);
+        browser = await puppeteer.launch({
+            headless: false,
+            args: ["--no-sandbox", "--disable-setuid-sandbox"],
+            defaultViewport: null, // 不限制页面视口，方便用户完整使用
+        });
+
+        const page = await browser.newPage();
+
+        console.log(`   ⏳ 访问 Gemini 登录页面...`);
+        await page.goto("https://auth.business.gemini.google/login?continueUrl=https://business.gemini.google/");
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        console.log(`   ⏳ 填入邮箱...`);
+        const emailSelector = "#email-input";
+        await page.waitForSelector(emailSelector);
+        await page.type(emailSelector, childAccount.email);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        console.log(`   ⏳ 点击下一步按钮...`);
+        const nextButtonSelector = "#log-in-button";
+        await page.click(nextButtonSelector);
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        console.log(`   ⏳ 等待验证码输入框...`);
+        const verificationCodeSelector = 'input[name="pinInput"]';
+        await page.waitForSelector(verificationCodeSelector);
+
+        console.log(`   ⏳ 等待邮件发送（10秒）...`);
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+
+        console.log(`   ⏳ 正在从邮箱获取验证码...`);
+        const verificationCode = await waitForGeminiVerificationCode(token, childAccount.accountId);
+
+        console.log(`   ⏳ 填入验证码...`);
+        await page.click(verificationCodeSelector);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await page.evaluate((selector) => {
+            document.querySelector(selector).value = "";
+        }, verificationCodeSelector);
+        await page.type(verificationCodeSelector, verificationCode, { delay: 100 });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        console.log(`   ⏳ 点击验证按钮...`);
+        const verifyButtonSelector = 'button[aria-label="验证"]';
+        await page.click(verifyButtonSelector);
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        console.log(`   ✓ 验证完成，等待页面跳转...`);
+        const maxWaitTime = 60000;
+        const startTime = Date.now();
+        let currentUrl = page.url();
+        while (!currentUrl.includes("/cid/") && Date.now() - startTime < maxWaitTime) {
+            console.log(`      当前 URL: ${currentUrl}`);
+            console.log(`      等待跳转到聊天页面...`);
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            currentUrl = page.url();
+        }
+
+        console.log(`   ⏳ 页面已跳转，等待完全加载（10秒）...`);
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+
+        console.log(`\n✅ 已登录成功并保持浏览器开启。`);
+        console.log(`   请直接在浏览器中使用，该会话不会自动关闭。`);
+        console.log(`   如需结束，请手动关闭浏览器窗口或中断进程。`);
+        success = true;
+    } catch (error) {
+        console.error(`   ❌ 登录过程出错: ${error.message}`);
+        if (browser) {
+            await browser.close();
+        }
+        throw error;
+    }
+
+    // 按要求保持浏览器开启；若成功则不关闭。
+    if (!success && browser) {
+        await browser.close();
+    }
+
+    // 阻塞等待用户操作结束
+    if (success) {
+        await promptInput("\n按回车键可结束与 CLI 的连接（浏览器自行关闭或继续使用均可）...", rl);
+    }
+}
+
+/**
  * 更新单个子号的 token
  * @param {Object} childAccount - 子号信息
  * @param {string} token - 已登录的会话令牌
@@ -403,6 +575,7 @@ async function autoRefreshGeminiTokens(currentLoginEmail, token) {
 module.exports = {
     verifyParentAccount,
     loginGeminiChild,
+    openGeminiChildInteractive,
     refreshChildToken,
     autoRefreshGeminiTokens,
 };

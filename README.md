@@ -35,6 +35,7 @@ credentials:
   password: your_password_here
 defaultDomain: '@example.com'
 emailApiUrl: 'https://mail.example.com'
+timezone: UTC # 邮件服务器所在位置时区，例如 UTC、UTC+08:00；（大陆服务器为UTC+08:00）
 ```
 
   - **说明**: `util/config.js` 会读取 `temp-mail.yaml`，并在 `credentials.account` 或 `credentials.password` 为空时抛出错误：

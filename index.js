@@ -6,6 +6,8 @@ const geminiAutoRefresh = require("./util/gemini/geminiAutoRefresh");
 const updateGeminiPool = require("./util/gemini/updateGeminiPool");
 const selectBusinessAccounts = require("./util/gemini/selectBusinessAccounts");
 const cleanInvalidAccounts = require("./util/gemini/cleanInvalidAccounts");
+const { openGeminiChildInteractive } = require("./util/gemini/autoRefresh");
+const { getGeminiChildrenAccounts } = require("./util/gemini/geminiConfig");
 const { autoLogin } = require("./util/auth");
 const readline = require("readline");
 
@@ -64,21 +66,21 @@ const chatgptTools = [
 const geminiTools = [
   {
     id: "1",
-    name: "重置已注册的 Business 账号（gemini-mail.yaml）",
+    name: "重置 gemini-mail.yaml 文件(重选已注册的企业版账号)",
     action: async (rl) => {
       return await selectBusinessAccounts(rl);
     },
   },
   {
     id: "2",
-    name: "检查并去除 Gemini Pool 失效账户",
+    name: "检查并去除失效账户(Gemini Pool)",
     action: async () => {
       return await cleanInvalidAccounts();
     },
   },
   {
     id: "3",
-    name: "（NEW）刷新账户 Token 并同步到 Gemini Pool",
+    name: "（HOT）刷新所有账户 Token 并同步到 Gemini Pool",
     action: async () => {
       if (!sessionToken) {
         throw new Error("会话令牌未初始化，请重启程序");
@@ -90,6 +92,52 @@ const geminiTools = [
       console.log("正在同步 Token 到 Gemini Pool 平台...");
       console.log("=".repeat(50));
       await updateGeminiPool();
+    },
+  },
+  {
+    id: "4",
+    name: "仅同步 gemini-mail.yaml 到 Gemini Pool(不重新获取 Token)",
+    action: async () => {
+      console.log("\n" + "=".repeat(50));
+      console.log("仅同步 gemini-mail.yaml 到 Gemini Pool 平台...");
+      console.log("=".repeat(50));
+      await updateGeminiPool();
+    },
+  },
+  {
+    id: "5",
+    name: "临时在线使用网页版（选择一个账户）",
+    action: async (rl) => {
+      if (!sessionToken) {
+        throw new Error("会话令牌未初始化，请重启程序");
+      }
+
+      const children = getGeminiChildrenAccounts();
+      if (!children || children.length === 0) {
+        console.log("❌ gemini-mail.yaml 中没有子账户，请先配置后再试。");
+        return;
+      }
+
+      console.log("\n当前 Gemini 子账户列表：");
+      console.log("=".repeat(80));
+      children.forEach((child, idx) => {
+        console.log(`${String(idx + 1).padEnd(3)} | ${child.email} | accountId: ${child.accountId ?? "未知"}`);
+      });
+      console.log("=".repeat(80));
+
+      const choice = await prompt("\n请选择要使用的序号（0 取消）: ", rl);
+      if (choice === "0") {
+        console.log("已取消。");
+        return;
+      }
+
+      const selectedIdx = parseInt(choice, 10) - 1;
+      if (Number.isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= children.length) {
+        throw new Error("无效的序号");
+      }
+
+      const selectedChild = children[selectedIdx];
+      await openGeminiChildInteractive(sessionToken, selectedChild, rl);
     },
   },
 ];
