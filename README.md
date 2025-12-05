@@ -22,6 +22,14 @@ npm install
 npm start
 ```
 
+- **快速刷新（跳过交互）**：
+
+```powershell
+npm run quick-refresh
+```
+
+效果等同菜单里的 “（HOT）刷新所有账户 Token 并同步到 Gemini Pool”。
+
 **配置说明**
 - 本项目使用 YAML 配置文件，主要有两个配置文件（项目根目录）：
   - `temp-mail.yaml`：临时邮箱相关配置（必需）

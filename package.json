@@ -1,10 +1,11 @@
 {
   "name": "new_openai",
-  "version": "1.0.0",
-  "description": "临时邮箱注册工具的起始模板项目",
+  "version": "1.1.0",
+  "description": "临时邮箱注册工具",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "quick-refresh": "node util/quickRefresh.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
